@@ -1,0 +1,297 @@
+#!/bin/bash
+
+if test $(id -u) != "0"; then
+  echo "Please supply root's password to uninstall the driver."
+  su -c "$0"
+  ret=$?
+  exit $ret
+fi
+
+MODNAME=
+
+if [ "$MODNAME" == "" ]; then
+  echo "Could not determine driver name"
+  exit
+fi
+
+ref=0
+if test -f /sys/module/${MODNAME}/refcnt; then
+  ref=`cat /sys/module/${MODNAME}/refcnt`
+fi
+
+if [ "$ref" != "0" ]; then
+  read -p "Module $MODNAME may be in use. Are you sure to uninstall the driver $MODNAME from system? (N/y): " ans
+else
+  read -p "Are you sure to uninstall the driver $MODNAME from system? (Y/n): " ans
+fi
+
+case "${ans:0:1}" in
+  "N"|"n" )
+    echo "Exiting now ..."
+    exit
+    ;;
+  "Y"|"y" )
+    #echo "Yes ..."
+    ;;
+  "" )
+    #echo "Default ..."
+    if [ "$ref" != 0 ]; then
+      echo "Exiting now ..."
+      exit
+    fi
+    ;;
+  * )
+    echo "Invalid answer, exiting now ... "
+    sleep 1
+    exit
+    ;;
+esac
+
+pushd /lib/modules > /dev/null
+for k in *; do
+  find $k -name ${MODNAME}.ko* -delete
+  depmod -a $k
+done
+popd > /dev/null
+
+rm -rf /usr/share/hptdrv/$MODNAME
+
+distinfo()
+{
+  local issue=/etc/issue
+  local osrelease=/etc/os-release
+
+  [ -e /etc/centos-release ] && { echo centos; return; }
+  [ -e /etc/fedora-release ] && { echo fedora; return; }
+  [ -e /etc/redhat-release ] && { echo redhat; return; }
+  [ -e /etc/SuSE-release ] && { echo suse; return; }
+  if [ -e $osrelease ]; then
+    grep "^ID=ubuntu" $osrelease -s -q && { echo ubuntu; return; }
+    grep "^ID=fedora" $osrelease -s -q && { echo fedora; return; }
+  fi
+  [ -e /etc/debian_version ] && { echo debian; return; }
+  if [ -e $issue ]; then
+    grep -i "debian" $issue && { echo debian; return; }
+    grep -i "ubuntu" $issue && { echo ubuntu; return; }
+    grep -i "red *hat" $issue && { echo redhat; return; }
+    grep -i "centos" $issue && { echo centos; return; }
+    grep -i "suse\|s\.u\.s\.e" $issue && { echo suse; return; }
+  fi
+}
+
+kernelver()
+{
+  kerverfromname=`echo $1 | rev | cut -d\/ -f1 | rev | cut -d- -f2-`
+  kerverfrommagic=`echo $1 | xargs file -b | sed s'#.*version \+\([^ ]*\) .*#\1#'`
+
+  kerver=""
+  if ( echo "$kerverfrommagic" | grep -s -q -e ^'2\.6\.[0-9]' -e ^'3\.[0-9]' -e ^'4\.[0-9]' -e ^'5\.[0-9]' -e ^'6\.[0-9]' ); then
+    kerver=$kerverfrommagic
+  elif ( echo "$kerverfromname" | grep -s -q -e ^'2\.6\.[0-9]' -e ^'3\.[0-9]' -e ^'4\.[0-9]' -e ^'5\.[0-9]' -e ^'6\.[0-9]' ); then
+    kerver=$kerverfromname
+  fi
+  logecho "kernelver:kernel ${1}"
+  logecho "kernelver:kernel version from name: ${kerverfromname}"
+  logecho "kernelver:kernel version from magic: ${kerverfrommagic}"
+  logecho "kernelver:--------------------"
+  echo "$kerver"
+  return
+}
+
+kernels=$( ls -tr /boot/vmlinuz-* 2>/dev/null | grep -v rescue | grep -v \\.old$ )
+
+dist=`distinfo`
+
+lsinitrd=`type -p lsinitramfs`
+if test "${lsinitrd}" = ""; then
+  lsinitrd=`type -p lsinitrd`
+fi
+
+function kernelver()
+{
+  kerverfromname=`echo $1 | rev | cut -d\/ -f1 | rev | cut -d- -f2-`
+  kerverfrommagic=`echo $1 | xargs file -b | sed s'#.*version \+\([^ ]*\) .*#\1#'`
+
+  kerver=""
+  if ( echo "$kerverfrommagic" | grep -s -q -e ^'2\.6\.[0-9]' -e ^'3\.[0-9]' -e ^'4\.[0-9]' -e ^'5\.[0-9]' -e ^'6\.[0-9]' ); then
+    kerver=$kerverfrommagic
+  elif ( echo "$kerverfromname" | grep -s -q -e ^'2\.6\.[0-9]' -e ^'3\.[0-9]' -e ^'4\.[0-9]' -e ^'5\.[0-9]' -e ^'6\.[0-9]' ); then
+    kerver=$kerverfromname
+  fi
+  echo "$kerver"
+}
+
+mkinitrd=`type -p dracut`
+[ "$mkinitrd" = "" ] && mkinitrd=`type -p mkinitramfs`
+[ "$mkinitrd" = "" ] && mkinitrd=`type -p mkinitrd`
+
+for kernel in ${kernels}; do
+  kerver=`kernelver ${kernel}`
+  if test -f /boot/initrd-${kerver}.img; then
+    initrdfile=/boot/initrd-${kerver}.img
+    initrdtype=1
+  elif test -f /boot/initramfs-${kerver}.img; then
+    initrdfile=/boot/initramfs-${kerver}.img
+    initrdtype=2
+  elif test -f /boot/initrd-${kerver}; then
+    initrdfile=/boot/initrd-${kerver}
+    initrdtype=3
+  elif test -f /boot/initrd.img-${kerver}; then
+    initrdfile=/boot/initrd.img-${kerver}
+    initrdtype=4
+  else
+    logecho "Could not detect initrd file for kernel ${kernel} version ${kerver}"
+    continue
+  fi
+
+  type=$(file -b "${initrdfile}" | cut -d\  -f1)
+  case "${type}" in
+    gzip )
+      compress=gzip
+      ;;
+    bzip2 )
+      compress=bzip2
+      ;;
+    lzma|LZMA )
+      compress=lzma
+      ;;
+    xz|XZ )
+      compress=xz
+      ;;
+    * )
+      compress=""
+      ;;
+  esac
+
+  if test "${lsinitrd}" = ""; then
+    if test "${compress}" = ""; then
+      continue
+    fi
+  fi
+
+  if [ ! -f "${initrdfile}" ]; then
+#    echo ""
+    continue
+  fi
+
+  if test "${lsinitrd}" != ""; then 
+    _initmods=$("$lsinitrd" "${initrdfile}" | grep \.ko$ | rev | cut -d/ -f1 | rev | while read line; do basename $line .ko; done)
+    _initmodsxz=$("$lsinitrd" "${initrdfile}" | grep \.ko.xz$ | rev | cut -d/ -f1 | rev | while read line; do basename $line .ko.xz; done)
+    _initmodsgz=$("$lsinitrd" "${initrdfile}" | grep \.ko.gz$ | rev | cut -d/ -f1 | rev | while read line; do basename $line .ko.gz; done)
+    _initmodsbz2=$("$lsinitrd" "${initrdfile}" | grep \.ko.bz2$ | rev | cut -d/ -f1 | rev | while read line; do basename $line .ko.bz2; done)
+    initmods="${_initmods} ${_initmodsxz} ${_initmodsgz} ${_initmodsbz2}"
+  else
+    initmods=$("${compress}" -dc "${initrdfile}" | cpio -t --quiet 2>/dev/null | grep \\.ko | while read line; do basename $line .ko; done)
+  fi
+  initmods=$(echo $initmods)
+
+  if echo ${initmods} | grep -w $MODNAME -s -q; then
+    case "${dist}" in
+      fedora | redhat | centos )
+        if echo "${mkinitrd}" | grep dracut -s -q; then
+          ${mkinitrd} --force -H "${initrdfile}" "${kerver}" > "${temp}/initrd.log-${kerver}"
+        else
+          ${mkinitrd} --force "${initrdfile}" "${kerver}" > "${temp}/initrd.log-${kerver}"
+        fi
+        ;;
+      suse )
+        ${mkinitrd} > "${temp}/initrd.log-${kerver}"
+        ;;
+      debian | ubuntu )
+        ${mkinitrd} -o "${initrdfile}" "${kerver}"
+        ret=$?
+        ;;
+    esac
+  fi
+done
+
+if test -d /usr/lib/dracut/modules.d; then
+  if test -f /usr/lib/dracut/modules.d/40hptdrv/dracut-hptdrv.sh; then
+    sed -i /$MODNAME/d /usr/lib/dracut/modules.d/40hptdrv/dracut-hptdrv.sh
+    #rm -f /usr/lib/dracut/modules.d/40hptdrv/dracut-hptdrv.sh
+    #rm -f /usr/lib/dracut/modules.d/40hptdrv/module-setup.sh
+  fi
+fi
+
+if test -d /etc/initramfs-tools/scripts/init-top; then
+  sed -i /$MODNAME/d /etc/initramfs-tools/scripts/init-top/hptdrv
+fi
+
+if [ -d /usr/share/hptdrv/ ]; then
+  pushd /usr/share/hptdrv/ > /dev/null
+  for file in *; do
+    if [ -d "$file" ]; then
+      rm -f /sbin/hptunin${MODNAME}
+      echo "Driver files deleted and common files left. quit now ... "
+      exit
+    fi
+  done
+  popd > /dev/null
+fi
+
+if test -d /usr/lib/dracut/modules.d/40hptdrv; then
+  rm -f /usr/lib/dracut/modules.d/40hptdrv/*
+  rmdir /usr/lib/dracut/modules.d/40hptdrv/
+fi
+
+if test -d /etc/initramfs-tools/scripts/init-top; then
+  rm -f /etc/initramfs-tools/scripts/init-top/hptdrv
+fi
+
+# disable service
+if type chkconfig >/dev/null 2>&1; then
+  chkconfig --del hptdrv-monitor
+fi
+if type update-rc.d >/dev/null 2>&1; then
+  update-rc.d -f hptdrv-monitor remove >/dev/null 2>&1
+
+  if test -e /etc/debian_version; then 
+    update-rc.d -f hptmod remove >/dev/null 2>&1
+  fi
+elif type systemctl >/dev/null 2>&1; then
+  systemctl stop hptdrv-monitor > /dev/null 2>&1
+  systemctl stop systemd-hptdrv >/dev/null 2>&1
+
+  systemctl disable hptdrv-monitor
+  systemctl disable systemd-hptdrv
+  
+  systemctl daemon-reload >/dev/null 2>&1
+
+  if test -d "/lib/systemd/system"; then
+    rm -f /lib/systemd/system/systemd-hptdrv.service
+    rm -f /lib/systemd/system/hptdrv-monitor.service
+  else
+    rm -f /usr/lib/systemd/system/systemd-hptdrv.service
+    rm -f /usr/lib/systemd/system/hptdrv-monitor.service
+  fi
+elif type insserv >/dev/null 2>&1; then
+  insserv -r -f /etc/init.d/hptdrv-monitor
+fi
+
+rm -f /etc/rc?.d/K??hptdrv-monitor
+rm -f /etc/rc?.d/S??hptdrv-monitor
+
+rm -f /etc/init.d/hptmod
+rm -f /sbin/hptdrv-monitor
+rm -f /usr/share/hptdrv/hptdrv-function
+rm -f /etc/init.d/hptdrv-monitor
+rm -f /usr/sbin/hptdrv-rebuild
+rm -f /etc/cron.daily/hptdrv-update
+
+if test -e /etc/debian_version; then
+  if test -f /etc/init.d/udev; then
+    sed -i s'#hptmod##' /etc/init.d/udev
+  fi
+fi
+rm -f /etc/init.d/hptmod
+
+rm -f /etc/init/hptdrv.conf
+rm -f /etc/init/udev.override
+
+rm -f /sbin/hptunin${MODNAME}
+
+rm -rf /usr/share/hptdrv
+
+echo "All files installed have been deleted from the system."
+
+# vim: expandtab ts=2 sw=2 ai

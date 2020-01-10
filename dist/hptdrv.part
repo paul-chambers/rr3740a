@@ -1,0 +1,6 @@
+# Added from hptdrv.part when install rr3740a
+if grep rr3740a /lib/modules/`uname -r`/modules.dep -s -q; then
+    echo "Loading driver rr3740a"
+    modprobe rr3740a 2> /dev/null
+fi # rr3740a # mark to delete driver entry
+
